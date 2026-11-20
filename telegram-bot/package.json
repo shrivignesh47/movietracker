@@ -1,0 +1,16 @@
+{
+  "name": "movietracker-telegram-bot",
+  "version": "1.0.0",
+  "description": "MovieTracker Telegram Bot (@movietracker) and Automated Booking Alert Engine",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "set-webhook": "node set-webhook.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.8",
+    "dotenv": "^16.4.5"
+  }
+}
