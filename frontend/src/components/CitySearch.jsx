@@ -7,7 +7,7 @@ import { cities } from '../api';
  * Queries District's live location search via /scrape-cities, with an
  * instant static list as the first-load fallback. Fully keyboard driven.
  */
-export default function CitySearch({ source, value, onChange, placeholder = 'Search any Indian city…' }) {
+export default function CitySearch({ source, value, onChange, placeholder = 'Search any Indian city…', label = '' }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [open, setOpen] = useState(false);
@@ -18,10 +18,11 @@ export default function CitySearch({ source, value, onChange, placeholder = 'Sea
   const debounceRef = useRef(null);
   const reqIdRef = useRef(0);
 
-  // Keep the input text in sync when the selection is cleared externally
+  // Keep the input text in sync with the committed selection (or cleared)
   useEffect(() => {
     if (!value) setQuery('');
-  }, [value]);
+    else if (label) setQuery(label);
+  }, [value, label]);
 
   const fetchCities = useCallback(async (q) => {
     const reqId = ++reqIdRef.current;

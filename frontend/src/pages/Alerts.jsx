@@ -1,29 +1,20 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import {
-  Bell, Clock, Ticket, Trash2, Pause, Play, ChevronRight, Plus,
-  Bot, AlertTriangle, CheckCircle, RefreshCw, X, Shield, Sparkles
+  Bell, Ticket, Trash2, Pause, Play, Plus,
+  Bot, AlertTriangle, CheckCircle, RefreshCw, Calendar, Languages
 } from 'lucide-react';
-import { supabase, alerts, telegram } from '../api';
-import CitySearch from '../components/CitySearch';
+import { alerts, telegram } from '../api';
+import AlertModal from '../components/AlertModal';
 import { toast } from 'react-hot-toast';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 
 export default function AlertsPage() {
-  const navigate = useNavigate();
   const [alertList, setAlertList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [checkingNow, setCheckingNow] = useState(false);
   const [tgStatus, setTgStatus] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
-
-  // New alert form state
-  const [formMovie, setFormMovie] = useState('');
-  const [formSource, setFormSource] = useState('bookmyshow');
-  const [formCity, setFormCity] = useState('hyderabad');
-  const [formCityName, setFormCityName] = useState('Hyderabad');
-  const [formTheater, setFormTheater] = useState('');
-  const [savingAlert, setSavingAlert] = useState(false);
 
   const botName = tgStatus?.bot_username || 'Theatre_Movie_tracker_bot';
 
@@ -91,51 +82,9 @@ export default function AlertsPage() {
     }
   };
 
-  const handleCreateAlert = async (e) => {
-    e.preventDefault();
-    if (!formMovie.trim()) {
-      toast.error('Please enter the movie title');
-      return;
-    }
-    setSavingAlert(true);
-    try {
-      const { data, error } = await alerts.create({
-        movie_title: formMovie.trim(),
-        source: formSource,
-        city_code: formCity,
-        city_name: formCityName || formCity,
-        theater_name: formTheater.trim() || null,
-        is_active: true,
-        status: 'pending',
-      });
-
-      if (error) throw error;
-      toast.success(`Tracking set for "${formMovie.trim()}"!`);
-      setShowAddModal(false);
-      setFormMovie('');
-      setFormTheater('');
-      const updated = await alerts.list();
-      setAlertList(updated.data || []);
-
-      // If telegram not connected, guide user
-      if (!tgStatus?.connected) {
-        toast((t) => (
-          <span className="flex items-center gap-2">
-            Link Telegram to get alerts on your phone!
-            <button
-              onClick={() => { toast.dismiss(t.id); navigate('/telegram'); }}
-              className="px-2.5 py-1 bg-accent-500 text-white rounded-lg text-xs font-bold"
-            >
-              Connect
-            </button>
-          </span>
-        ), { duration: 6000 });
-      }
-    } catch (err) {
-      toast.error(err.message || 'Failed to save alert');
-    } finally {
-      setSavingAlert(false);
-    }
+  const refreshList = async () => {
+    const updated = await alerts.list();
+    setAlertList(updated.data || []);
   };
 
   if (loading) {
@@ -261,112 +210,28 @@ export default function AlertsPage() {
         </motion.div>
       )}
 
-      {/* ADD ALERT MODAL */}
-      <AnimatePresence>
-        {showAddModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="glass-panel p-6 sm:p-8 rounded-4xl max-w-lg w-full relative border border-white/15"
-            >
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="absolute top-5 right-5 text-white/50 hover:text-white p-2 rounded-xl hover:bg-white/5 transition-colors"
-              >
-                <X size={20} />
-              </button>
-
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 rounded-2xl bg-accent-500/20 text-accent-400 flex items-center justify-center shadow-neon">
-                  <Sparkles size={24} />
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold font-display text-white">Add Booking Alert</h3>
-                  <p className="text-xs text-white/50">Pre-book alert for any movie & theater</p>
-                </div>
-              </div>
-
-              <form onSubmit={handleCreateAlert} className="space-y-4">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">
-                    Movie Title *
-                  </label>
-                  <input
-                    type="text"
-                    value={formMovie}
-                    onChange={(e) => setFormMovie(e.target.value)}
-                    placeholder="e.g. Avengers: Doomsday"
-                    required
-                    className="glass-input"
-                  />
-                  <p className="text-[11px] text-white/40">
-                    Works for any announced, upcoming, or current movie.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">
-                      Platform
-                    </label>
-                    <select
-                      value={formSource}
-                      onChange={(e) => setFormSource(e.target.value)}
-                      className="glass-input"
-                    >
-                      <option value="bookmyshow">BookMyShow</option>
-                      <option value="district">District</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">
-                      City
-                    </label>
-                    <CitySearch
-                      source={formSource}
-                      value={formCity}
-                      onChange={(code, name) => {
-                        setFormCity(code);
-                        setFormCityName(name);
-                      }}
-                      placeholder="Search any Indian city…"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">
-                    Specific Theater (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={formTheater}
-                    onChange={(e) => setFormTheater(e.target.value)}
-                    placeholder="e.g. Cinepolis, PVR Forum, INOX (or leave blank for all)"
-                    className="glass-input"
-                  />
-                  <p className="text-[11px] text-white/40">
-                    Leave blank to get notified when ANY theater in {formCity} opens booking.
-                  </p>
-                </div>
-
-                <div className="pt-3">
-                  <button
-                    type="submit"
-                    disabled={savingAlert}
-                    className="btn-primary w-full justify-center text-sm py-3.5 shadow-neon"
-                  >
-                    {savingAlert ? <RefreshCw size={18} className="animate-spin" /> : <><Bell size={18} /> Start Monitoring</>}
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Structured add-alert flow: city → platform → theatre → date → Telegram */}
+      <AlertModal
+        open={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        tgStatus={tgStatus}
+        refreshTg={() => telegram.status().then((r) => setTgStatus(r?.data || null)).catch(() => {})}
+        showCity
+        showPlatform
+        initial={{
+          movieTitle: '',
+          cityCode: 'hyderabad',
+          cityName: 'Hyderabad',
+          source: 'bookmyshow',
+          suggestions: [],
+          showDates: [],
+        }}
+        onSaved={() => {
+          refreshList();
+          setShowAddModal(false);
+          toast.success("We'll check it for you — you'll get a Telegram message the second bookings open.");
+        }}
+      />
     </div>
   );
 }
@@ -403,6 +268,27 @@ function AlertCard({ alert, onToggle, onDelete }) {
           <span>📍 {alert.city_name || alert.city_code}</span>
           <span>•</span>
           <span>🎭 {alert.theater_name ? alert.theater_name : 'All theaters in city'}</span>
+          {alert.language && (
+            <>
+              <span>•</span>
+              <span className="inline-flex items-center gap-1 text-accent-400 font-semibold">
+                <Languages size={11} /> {alert.language}
+              </span>
+            </>
+          )}
+          {alert.target_date && (
+            <>
+              <span>•</span>
+              <span className="inline-flex items-center gap-1 text-accent-400 font-semibold">
+                <Calendar size={11} /> {alert.target_date}
+              </span>
+            </>
+          )}
+          {alert.alt_source_movie_id && (
+            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-lg bg-purple-500/10 text-purple-300 border border-purple-400/25">
+              Both platforms
+            </span>
+          )}
           {alert.last_checked_at && (
             <>
               <span>•</span>

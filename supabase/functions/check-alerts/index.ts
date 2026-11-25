@@ -184,20 +184,38 @@ function bmsDynamicData(state: any): any | null {
   return key ? queries[key]?.data?.data ?? null : null;
 }
 
+/**
+ * Date chips: `cta.additionalData.dateCode`, or `item.id` with a `date-*`
+ * styleId (disabled chips carry no cta data at all).
+ */
 function bmsChipsOf(data: any): string[] {
   const raw: string[] = [];
   for (const sticky of data?.topStickyWidgets ?? []) {
     for (const item of sticky?.data ?? []) {
-      const code = String(item?.cta?.additionalData?.dateCode ?? "");
-      if (/^\d{8}$/.test(code)) raw.push(code);
+      const style = String(item?.styleId ?? "");
+      const ctaCode = String(item?.cta?.additionalData?.dateCode ?? "");
+      const idCode = String(item?.id ?? "");
+      let code = "";
+      if (/^\d{8}$/.test(ctaCode)) code = ctaCode;
+      else if (style.startsWith("date") && /^\d{8}$/.test(idCode)) code = idCode;
+      if (!code || style === "date-disabled") continue;
+      raw.push(code);
     }
   }
   return [...new Set(raw)].sort();
 }
 
-/** Venue name → session count from a showtimes payload. */
-function bmsVenuesOf(data: any): { name: string; sessions: number }[] {
+/** "Hindi • 2D | BARCO …" → language is the first segment before "•". */
+function bmsLanguageOf(fmtStr: any): string {
+  const segs = String(fmtStr ?? "").split("|").map((x) => x.trim()).filter(Boolean);
+  const bits = (segs[0] ?? "").split("•").map((x) => x.trim()).filter(Boolean);
+  return bits[0] ?? "";
+}
+
+/** Venue name → session count from a showtimes payload (language aware). */
+function bmsVenuesOf(data: any, language?: string | null): { name: string; sessions: number }[] {
   const out: { name: string; sessions: number }[] = [];
+  const want = String(language ?? "").trim().toLowerCase();
   for (const w of data?.showtimeWidgets ?? []) {
     if (w?.type !== "groupList") continue;
     for (const g of w?.data ?? []) {
@@ -211,7 +229,14 @@ function bmsVenuesOf(data: any): { name: string; sessions: number }[] {
         for (const sec of c?.showtimesSections ?? []) {
           for (const s of sec?.showtimes ?? []) {
             const sid = String(s?.additionalData?.sessionId ?? "");
-            if (sid) sessions++;
+            if (!sid) continue;
+            if (want) {
+              const widgets = s?.customGestureCTA?.additionalData?.bottomSheetData?.widgets ?? [];
+              const fmt = widgets.find((x: any) => x?.layoutId === "format-container")?.variableData?.format;
+              const lang = bmsLanguageOf(fmt).toLowerCase();
+              if (lang && lang !== want) continue;
+            }
+            sessions++;
           }
         }
         out.push({ name: String(name), sessions });
@@ -281,28 +306,37 @@ async function checkBookMyShow(alert: any) {
   }
 
   const target = String(alert.theater_name ?? "").trim().toLowerCase();
+  const language = String(alert.language ?? "").trim() || null;
+  const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(String(alert.target_date ?? ""))
+    ? String(alert.target_date).replace(/-/g, "")
+    : null;
   const todayCode = bmsTodayCode();
 
-  const first = await bmsFetchPage(region.slug, slug, et, todayCode);
+  const first = await bmsFetchPage(region.slug, slug, et, targetDate ?? todayCode);
   if (first.status === 404 || !first.state) return { open: false, note: "bms page not found" };
   const firstData = bmsDynamicData(first.state);
   if (!firstData) return { open: false, note: "no showtimes payload" };
 
   const chips = bmsChipsOf(firstData);
-  const dates = [...new Set([todayCode, ...chips])].sort().slice(0, 4);
+  // A chosen show date narrows the check to that date; otherwise walk every
+  // date chip BMS offers (today + next days) because advance bookings can
+  // open for a future date while today has no shows yet.
+  const dates = targetDate
+    ? [targetDate]
+    : [...new Set([todayCode, ...chips])].sort().slice(0, 4);
 
   const bookableUrl = `https://in.bookmyshow.com/movies/${region.slug}/${slug}/${et}`;
   let firstVenueName: string | null = null;
 
   for (const dateCode of dates) {
     let data = firstData;
-    if (dateCode !== todayCode) {
+    if (dateCode !== (targetDate ?? todayCode)) {
       const page = await bmsFetchPage(region.slug, slug, et, dateCode);
       if (page.status === 404 || !page.state) continue;
       data = bmsDynamicData(page.state);
       if (!data) continue;
     }
-    const venues = bmsVenuesOf(data).filter((v) => v.sessions > 0);
+    const venues = bmsVenuesOf(data, language).filter((v) => v.sessions > 0);
     if (!venues.length) continue;
     if (!firstVenueName) firstVenueName = venues[0].name;
 
@@ -324,6 +358,9 @@ async function checkDistrict(alert: any) {
     const contentId = String(alert.source_movie_id ?? "").replace(/^MV/i, "");
     if (!contentId) return { open: false, note: "no district movie id" };
     const today = new Date(Date.now() + TZ_OFFSET_MINUTES * 60000).toISOString().slice(0, 10);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(alert.target_date ?? ""))
+      ? String(alert.target_date)
+      : today;
     const q = new URLSearchParams({
       version: "3",
       site_id: "1",
@@ -333,7 +370,7 @@ async function checkDistrict(alert: any) {
       movieCode: "",
       city_key: String(alert.city_code ?? ""),
       content_id: contentId,
-      date: today,
+      date,
       latitude: "0",
       longitude: "0",
       cinemaOrderLogic: "3",
@@ -362,12 +399,33 @@ async function checkDistrict(alert: any) {
     if (!cinemas.length) return { open: false, note: "no cinemas listed" };
 
     const target = String(alert.theater_name ?? "").trim().toLowerCase();
+    const language = String(alert.language ?? "").trim().toLowerCase();
+
+    // session.mcd → language title, from District's Language filter bucket
+    const langMap = new Map<string, string>();
+    if (language) {
+      const buckets = data?.meta?.filterBuckets;
+      const lb = Array.isArray(buckets)
+        ? buckets.find((b: any) => String(b?.bucketKey ?? b?.bucketName ?? "").toLowerCase() === "language")
+        : null;
+      for (const b of lb?.buckets ?? []) {
+        if (b?.key && b?.title) langMap.set(String(b.key).toLowerCase(), String(b.title).toLowerCase());
+      }
+    }
+
     let firstVenueName: string | null = null;
 
     for (const c of cinemas) {
       const name = String(c?.cinemaInfo?.name || "Unknown theatre");
-      const hasSessions = Array.isArray(c?.sessions) && c.sessions.length > 0;
-      if (!hasSessions) continue;
+      const sessions = (Array.isArray(c?.sessions) ? c.sessions : []).filter((s: any) => {
+        if (!language) return true;
+        const key = String(s?.mcd ?? "").toLowerCase();
+        if (!key) return true;
+        const title = langMap.get(key);
+        if (!title) return true;
+        return title === language;
+      });
+      if (!sessions.length) continue;
       if (!firstVenueName) firstVenueName = name;
       if (!target || name.toLowerCase().includes(target)) {
         return {
@@ -460,10 +518,28 @@ serve(async (req) => {
         chatId = link?.telegram_chat_id ?? null;
       }
 
-      const bookingStatus =
-        alert.source === "district"
-          ? await checkDistrict(alert)
-          : await checkBookMyShow(alert);
+      const primaryIsDistrict = alert.source === "district";
+      let bookingStatus = primaryIsDistrict
+        ? await checkDistrict(alert)
+        : await checkBookMyShow(alert);
+      let platform = primaryIsDistrict ? "District" : "BookMyShow";
+
+      // The alert can carry the same movie's id on the other platform —
+      // bookings sometimes open there first, so check it too before giving up.
+      if (!bookingStatus.open && alert.alt_source_movie_id) {
+        const altAlert = {
+          ...alert,
+          source: primaryIsDistrict ? "bookmyshow" : "district",
+          source_movie_id: alert.alt_source_movie_id,
+        };
+        const alt = altAlert.source === "district"
+          ? await checkDistrict(altAlert)
+          : await checkBookMyShow(altAlert);
+        if (alt.open) {
+          bookingStatus = alt;
+          platform = altAlert.source === "district" ? "District" : "BookMyShow";
+        }
+      }
 
       const nowIso = new Date().toISOString();
 
@@ -477,7 +553,9 @@ serve(async (req) => {
               `🎬 *${alert.movie_title}*\n` +
               `🎭 Theater: *${theaterDisplay}*\n` +
               `📍 City: *${alert.city_name || alert.city_code}*\n` +
-              `🎟️ Platform: *${alert.source === "district" ? "District" : "BookMyShow"}*\n` +
+              (alert.language ? `🗣️ Language: *${alert.language}*\n` : "") +
+              (alert.target_date ? `📅 Show date: *${alert.target_date}*\n` : "") +
+              `🎟️ Platform: *${platform}*\n` +
               `⚡ Status: *Bookings are officially open!*\n\n` +
               `👉 *Book your seats immediately:*\n${bookingStatus.bookableUrl || "Check platform app/website"}`;
 

@@ -233,7 +233,7 @@ export default function Telegram() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="glass-panel p-4 rounded-2xl bg-white/5">
                   <p className="text-xs text-white/40 uppercase tracking-wider font-semibold mb-1">Bot Name</p>
-                  <p className="font-bold text-white font-mono">@{botName}</p>
+                  <p className="font-bold text-white font-mono break-all text-sm sm:text-base">@{botName}</p>
                 </div>
                 <div className="glass-panel p-4 rounded-2xl bg-white/5">
                   <p className="text-xs text-white/40 uppercase tracking-wider font-semibold mb-1">Notification Speed</p>

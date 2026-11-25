@@ -1,9 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Ticket, Building2, Bell, Calendar, Film, MapPin, Clock, ExternalLink, Radio, Sparkles } from 'lucide-react';
-import { theaters, alerts } from '../api';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  ArrowLeft, Ticket, Building2, Bell, Calendar, Film, MapPin, Clock,
+  ExternalLink, Radio, Languages
+} from 'lucide-react';
+import { theaters, telegram } from '../api';
+import TheaterSelect from '../components/TheaterSelect';
+import AlertModal from '../components/AlertModal';
 import { toast } from 'react-hot-toast';
 import { motion } from 'framer-motion';
+
+const prettyCity = (code) =>
+  code ? code.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : '';
 
 export default function MovieDetail() {
   const { source, movieId } = useParams();
@@ -12,37 +20,58 @@ export default function MovieDetail() {
 
   const cityCode = searchParams.get('city_code') || '';
   const slug = searchParams.get('slug') || '';
+  const altId = searchParams.get('alt_id') || '';
+  const altSlug = searchParams.get('alt_slug') || '';
 
   const [movie, setMovie] = useState(null);
   const [theaterList, setTheaterList] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
+  const [languages, setLanguages] = useState([]);
   const [showDates, setShowDates] = useState([]);
   const [activeDate, setActiveDate] = useState('');
   const [blocked, setBlocked] = useState(false);
   const [notListed, setNotListed] = useState(false);
   const [note, setNote] = useState('');
   const [stats, setStats] = useState(null);
+  const [sourceUsed, setSourceUsed] = useState(source);
   const [selectedTheater, setSelectedTheater] = useState('');
-  const [customTheater, setCustomTheater] = useState('');
+  const [theaterQuery, setTheaterQuery] = useState('');
+  const [language, setLanguage] = useState('');
+  const [langPicked, setLangPicked] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [setting, setSetting] = useState(false);
+  const [tgStatus, setTgStatus] = useState(null);
+  const [showAlertModal, setShowAlertModal] = useState(false);
 
   // Pre-booking title fallback from slug if movie meta not returned
   const fallbackTitle = slug
     ? slug.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
     : 'Upcoming Movie';
 
+  // Language lives in a ref so changing it never re-creates loadMovie
+  // (which would otherwise loop through the effect below).
+  const langRef = useRef('');
+
   const loadMovie = useCallback(async (date) => {
     setLoading(true);
     try {
-      const res = await theaters(source, movieId, cityCode, { date: date || null, slug });
+      const res = await theaters(source, movieId, cityCode, {
+        date: date || null,
+        slug,
+        language: langRef.current || null,
+        altId,
+        altSlug,
+      });
       const data = res.data || {};
       setMovie(data.movie || null);
       setTheaterList(data.theaters || []);
+      setSuggestions(data.suggestions || []);
+      setLanguages(data.languages || []);
       setShowDates(data.showDates || []);
       setBlocked(!!data.blocked);
       setNotListed(!!data.notListed);
       setNote(data.note || '');
       setStats(data.stats || null);
+      setSourceUsed(data.source_used || source);
       if (data.date && !date) setActiveDate(data.date);
       if (date) setActiveDate(date);
     } catch (err) {
@@ -50,39 +79,35 @@ export default function MovieDetail() {
     } finally {
       setLoading(false);
     }
-  }, [source, movieId, cityCode, slug]);
+  }, [source, movieId, cityCode, slug, altId, altSlug]);
 
   useEffect(() => {
     loadMovie();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadMovie]);
 
-  const handleSetAlert = async (theaterNameToUse) => {
-    const titleToUse = movie?.title || fallbackTitle;
-    const finalTheater = theaterNameToUse !== undefined ? theaterNameToUse : (customTheater.trim() || selectedTheater || null);
+  useEffect(() => {
+    telegram.status().then((r) => setTgStatus(r?.data || null)).catch(() => {});
+  }, []);
 
-    setSetting(true);
-    try {
-      const { error } = await alerts.create({
-        telegram_chat_id: null,
-        movie_title: titleToUse,
-        source_movie_id: movieId,
-        slug: slug || null,
-        city_code: movie?.city_code || cityCode,
-        source,
-        theater_name: finalTheater,
-        is_active: true,
-      });
-      if (error) throw error;
-      toast.success(`Alert set for "${titleToUse}"${finalTheater ? ` @ ${finalTheater}` : ''}!`);
-      navigate('/alerts');
-    } catch (err) {
-      toast.error(err.message || 'Failed to set alert');
-    } finally {
-      setSetting(false);
-    }
+  const pickLanguage = (lang) => {
+    langRef.current = lang;
+    setLanguage(lang);
+    setLangPicked(true);
+    loadMovie(activeDate || null);
   };
 
-  if (loading && !movie) {
+  const cityLabel = prettyCity(cityCode);
+
+  // Which ids the alert should watch: the platform that actually answered,
+  // plus the other platform's id so openings on either side are caught.
+  const alertSource = sourceUsed || source;
+  const alertMovieId = movie?.source_movie_id || movieId;
+  const alertAltId = alertMovieId && alertMovieId !== movieId ? movieId : (altId || null);
+
+  const openAlertModal = () => setShowAlertModal(true);
+
+  if (loading && !movie && !notListed) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
@@ -114,38 +139,61 @@ export default function MovieDetail() {
           <p className="text-white/60 text-sm leading-relaxed mb-6">
             {note || (blocked
               ? 'BookMyShow is temporarily limiting requests from our servers. It usually clears within a minute — set an alert and we keep watching for you.'
-              : `Tickets haven't opened yet for this movie in ${cityCode || 'your city'}. Set an alert and we'll ping you on Telegram the exact minute booking opens!`)}
+              : `Tickets haven't opened yet for this movie in ${cityLabel || 'your city'}. Set an alert and we'll ping you on Telegram the exact minute booking opens!`)}
           </p>
 
-          <div className="space-y-4 text-left bg-white/5 p-5 rounded-2xl border border-white/10 mb-6">
-            <label className="text-xs font-semibold text-white/50 uppercase tracking-wider block">
-              Watch Specific Theater (e.g. Cinepolis)
-            </label>
-            <input
-              type="text"
-              value={customTheater}
-              onChange={(e) => setCustomTheater(e.target.value)}
-              placeholder="e.g. Cinepolis, PVR Forum, INOX (or leave blank for all)"
-              className="glass-input text-sm"
-            />
-            <p className="text-[11px] text-white/40">
-              When Cinepolis or your chosen cinema opens booking, MovieTracker alerts your Telegram immediately.
+          <div className="space-y-3 text-left bg-white/5 p-5 rounded-2xl border border-white/10 mb-6">
+            <p className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+              What happens next
             </p>
+            <ol className="space-y-2 text-sm text-white/70">
+              <li className="flex gap-2.5">
+                <span className="text-accent-400 font-bold">1</span>
+                Choose your theatre and a date
+              </li>
+              <li className="flex gap-2.5">
+                <span className="text-accent-400 font-bold">2</span>
+                Connect Telegram so we can reach you
+              </li>
+              <li className="flex gap-2.5">
+                <span className="text-accent-400 font-bold">3</span>
+                We check every minute and alert you the second it opens
+              </li>
+            </ol>
           </div>
 
           <div className="flex flex-col gap-3">
             <button
-              onClick={() => handleSetAlert(customTheater.trim() || null)}
-              disabled={setting}
+              onClick={openAlertModal}
               className="btn-primary w-full justify-center shadow-neon"
             >
-              {setting ? <Bell size={18} className="animate-spin" /> : <><Bell size={18} /> Set Telegram Alert for This Movie</>}
+              <Bell size={18} /> Set Telegram Alert for This Movie
             </button>
             <button onClick={() => navigate(-1)} className="btn-outline justify-center">
               Go Back
             </button>
           </div>
         </motion.div>
+
+        <AlertModal
+          open={showAlertModal}
+          onClose={() => setShowAlertModal(false)}
+          tgStatus={tgStatus}
+          refreshTg={() => telegram.status().then((r) => setTgStatus(r?.data || null)).catch(() => {})}
+          initial={{
+            movieTitle: fallbackTitle,
+            cityCode,
+            cityName: cityLabel,
+            source: alertSource,
+            sourceMovieId: alertMovieId,
+            slug,
+            altSourceMovieId: alertAltId,
+            language: language || null,
+            showDates,
+            suggestions,
+            theater: '',
+          }}
+        />
       </div>
     );
   }
@@ -164,6 +212,15 @@ export default function MovieDetail() {
   }
 
   const totalSessions = theaterList.reduce((n, t) => n + (t.sessions?.length || 0), 0);
+  const needsLanguageChoice = languages.length > 1 && !language && !langPicked;
+  const platformLabel = sourceUsed === 'district' ? 'District' : 'BookMyShow';
+
+  const query = theaterQuery.trim().toLowerCase();
+  const visibleTheaters = theaterList.filter((t) => {
+    if (selectedTheater) return t.name === selectedTheater;
+    if (query) return t.name.toLowerCase().includes(query) || String(t.chain || '').toLowerCase().includes(query);
+    return true;
+  });
 
   return (
     <div className="space-y-8 pb-10">
@@ -207,9 +264,9 @@ export default function MovieDetail() {
             <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
               <div>
                 <span className="badge bg-accent-500/20 text-accent-400 border-accent-500/40 mb-3">
-                  <Radio size={11} /> Live from {source === 'district' ? 'District' : 'BookMyShow'}
+                  <Radio size={11} /> Live from {platformLabel}
                 </span>
-                <div className="flex flex-wrap items-center gap-3 text-white/70 text-sm">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-white/70 text-sm">
                   {stats && (
                     <span className="flex items-center gap-1.5">
                       <Building2 size={14} className="text-accent-400" />
@@ -226,6 +283,12 @@ export default function MovieDetail() {
                     <span className="flex items-center gap-1.5">
                       <Calendar size={14} className="text-accent-400" />
                       {activeDate}
+                    </span>
+                  )}
+                  {language && (
+                    <span className="flex items-center gap-1.5">
+                      <Languages size={14} className="text-accent-400" />
+                      {language}
                     </span>
                   )}
                 </div>
@@ -247,123 +310,216 @@ export default function MovieDetail() {
         </div>
       </motion.div>
 
-      {/* Date selector */}
-      {showDates.length > 1 && (
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-          <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3 block">
-            Show date
-          </label>
-          <div className="flex gap-2.5 overflow-x-auto pb-2 -mx-1 px-1">
-            {showDates.map((d) => {
-              const active = d === activeDate;
-              const dt = new Date(`${d}T00:00:00`);
-              return (
+      {/* Language chooser — multi-language movies (Ramayana: Hindi / Tamil / Telugu) */}
+      {needsLanguageChoice ? (
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="glass-panel p-7 sm:p-9 rounded-3xl border border-accent-500/30 text-center"
+        >
+          <div className="w-14 h-14 rounded-2xl bg-accent-500/15 text-accent-400 flex items-center justify-center mx-auto mb-4">
+            <Languages size={26} />
+          </div>
+          <h2 className="text-xl sm:text-2xl font-bold font-display text-white mb-2">
+            Which language do you want to watch?
+          </h2>
+          <p className="text-white/60 text-sm max-w-md mx-auto mb-6">
+            {movie.title} plays in <strong className="text-white">{languages.join(', ')}</strong>{' '}
+            {cityLabel ? `in ${cityLabel}` : 'here'}. Pick one to see its showtimes.
+          </p>
+          <div className="flex flex-wrap justify-center gap-3 mb-5">
+            {languages.map((lang) => (
+              <button
+                key={lang}
+                onClick={() => pickLanguage(lang)}
+                className="px-6 py-3.5 rounded-2xl text-sm font-bold bg-white/5 border border-white/10 text-white hover:bg-white/10 hover:border-accent-500/50 transition-all shadow-neon"
+              >
+                {lang}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => { setLangPicked(true); loadMovie(); }}
+            className="text-xs text-white/40 hover:text-white transition-colors underline underline-offset-4"
+          >
+            Show all languages
+          </button>
+        </motion.div>
+      ) : (
+        <>
+          {/* Language chips (after a choice, still switchable) */}
+          {languages.length > 1 && (
+            <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
+              <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3 block">
+                Language
+              </label>
+              <div className="flex flex-wrap gap-2.5">
                 <button
-                  key={d}
-                  onClick={() => loadMovie(d)}
-                  className={`flex-shrink-0 px-5 py-3 rounded-2xl text-sm font-bold transition-all duration-300 border ${
-                    active
+                  onClick={() => { langRef.current = ''; setLanguage(''); setLangPicked(true); loadMovie(activeDate || null); }}
+                  className={`px-4 py-2.5 rounded-xl text-xs font-bold border transition-all ${
+                    !language
                       ? 'bg-gradient-to-r from-accent-500 to-cinema-600 text-white border-transparent shadow-neon'
-                      : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10 hover:text-white'
+                      : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10'
                   }`}
                 >
-                  <span className="block text-[10px] uppercase tracking-wider opacity-70">
-                    {dt.toLocaleDateString('en-IN', { weekday: 'short' })}
-                  </span>
-                  <span className="block">
-                    {dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-                  </span>
+                  All languages
                 </button>
-              );
-            })}
-          </div>
-        </motion.div>
-      )}
+                {languages.map((lang) => (
+                  <button
+                    key={lang}
+                    onClick={() => pickLanguage(lang)}
+                    className={`px-4 py-2.5 rounded-xl text-xs font-bold border transition-all ${
+                      language === lang
+                        ? 'bg-gradient-to-r from-accent-500 to-cinema-600 text-white border-transparent shadow-neon'
+                        : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    {lang}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
 
-      {/* Theaters + showtimes */}
-      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="font-bold text-lg font-display">
-            Showtimes {loading && <span className="text-white/40 text-sm font-normal">…updating</span>}
-          </h2>
-          <p className="text-xs text-white/40">
-            {theaterList.length} theatre{theaterList.length !== 1 ? 's' : ''} · {totalSessions} shows
-          </p>
-        </div>
+          {/* Date selector */}
+          {showDates.length > 1 && (
+            <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
+              <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3 block">
+                Show date
+              </label>
+              <div className="flex gap-2.5 overflow-x-auto pb-2 -mx-1 px-1">
+                {showDates.map((d) => {
+                  const active = d === activeDate;
+                  const dt = new Date(`${d}T00:00:00`);
+                  return (
+                    <button
+                      key={d}
+                      onClick={() => loadMovie(d)}
+                      className={`flex-shrink-0 px-5 py-3 rounded-2xl text-sm font-bold transition-all duration-300 border ${
+                        active
+                          ? 'bg-gradient-to-r from-accent-500 to-cinema-600 text-white border-transparent shadow-neon'
+                          : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      <span className="block text-[10px] uppercase tracking-wider opacity-70">
+                        {dt.toLocaleDateString('en-IN', { weekday: 'short' })}
+                      </span>
+                      <span className="block">
+                        {dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
 
-        {/* Theater filter & Custom target input */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-1.5 block">
-              Filter Listed Theaters
-            </label>
-            <select
-              value={selectedTheater}
-              onChange={(e) => { setSelectedTheater(e.target.value); setCustomTheater(''); }}
-              className="glass-input"
+          {/* Your theatre — suggested dropdown */}
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
+            <div>
+              <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2 block">
+                Your theatre
+              </label>
+              <TheaterSelect
+                options={[...suggestions, ...theaterList]}
+                value={selectedTheater}
+                onChange={setSelectedTheater}
+                onQuery={setTheaterQuery}
+                cityLabel={cityLabel}
+              />
+              <p className="text-[11px] text-white/40 mt-2">
+                {suggestions.length
+                  ? `${suggestions.length} theatre${suggestions.length !== 1 ? 's' : ''} showing this movie in ${cityLabel || 'your city'} — pick yours to filter, or leave blank for all.`
+                  : 'Pick a theatre to filter, or leave blank to see everything.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="font-bold text-lg font-display">
+                Showtimes {loading && <span className="text-white/40 text-sm font-normal">…updating</span>}
+              </h2>
+              <p className="text-xs text-white/40">
+                {visibleTheaters.length} theatre{visibleTheaters.length !== 1 ? 's' : ''} · {totalSessions} shows
+              </p>
+            </div>
+
+            {theaterList.length === 0 ? (
+              /* Missing your theatre? It hasn't opened yet — offer the alert flow. */
+              <div className="glass-panel p-8 sm:p-10 text-center rounded-3xl border border-accent-500/30">
+                <div className="w-14 h-14 rounded-2xl bg-accent-500/15 text-accent-400 flex items-center justify-center mx-auto mb-4 shadow-neon">
+                  <Bell size={26} />
+                </div>
+                <h3 className="text-lg sm:text-xl font-bold text-white font-display mb-2">
+                  {selectedTheater
+                    ? `${selectedTheater} hasn't opened bookings yet`
+                    : "Bookings aren't open yet"}
+                </h3>
+                <p className="text-white/60 text-sm max-w-lg mx-auto mb-2">
+                  Missing your theatre? Don't worry —{' '}
+                  {note || "we couldn't find live shows here right now."}
+                </p>
+                <p className="text-white/50 text-sm max-w-lg mx-auto mb-6">
+                  Choose your theatre, a date and confirm — we'll check every minute and message your
+                  Telegram the second tickets go live.
+                </p>
+                <button
+                  onClick={openAlertModal}
+                  className="btn-primary justify-center shadow-neon mx-auto"
+                >
+                  <Bell size={18} /> Click here to set an alert
+                </button>
+              </div>
+            ) : visibleTheaters.length === 0 ? (
+              <div className="glass-panel p-10 text-center rounded-3xl">
+                <Building2 size={40} className="mx-auto mb-4 text-white/20" />
+                <h3 className="font-bold text-white mb-2">No theatre matches “{theaterQuery || selectedTheater}”</h3>
+                <p className="text-white/50 text-sm mb-5">
+                  Clear the filter to see all {theaterList.length} theatres, or set an alert for it.
+                </p>
+                <button onClick={() => { setSelectedTheater(''); setTheaterQuery(''); }} className="btn-outline justify-center mx-auto">
+                  Clear filter
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {visibleTheaters.map((t, i) => (
+                  <TheaterCard key={t.id || i} theater={t} />
+                ))}
+              </div>
+            )}
+
+            {/* Alert Button */}
+            <button
+              onClick={openAlertModal}
+              className="btn-primary w-full py-4 text-base justify-center shadow-neon mt-2"
             >
-              <option value="">All theatres for this movie</option>
-              {theaterList.map((t) => (
-                <option key={t.id} value={t.name}>{t.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-1.5 block">
-              Or Custom Theater (e.g. Cinepolis)
-            </label>
-            <input
-              type="text"
-              value={customTheater}
-              onChange={(e) => { setCustomTheater(e.target.value); setSelectedTheater(''); }}
-              placeholder="e.g. Cinepolis, PVR Forum Mall"
-              className="glass-input"
-            />
-          </div>
-        </div>
-
-        {theaterList.length === 0 ? (
-          <div className="glass-panel p-12 text-center rounded-3xl">
-            <Clock size={44} className="mx-auto mb-4 text-white/20" />
-            <h3 className="font-bold text-white mb-2">No shows for this date</h3>
-            <p className="text-white/50 text-sm max-w-md mx-auto mb-4">
-              {showDates.length > 0
-                ? 'Pick another date above — bookings are open for those days.'
-                : 'Bookings haven’t opened yet at this theater. Set an alert and we’ll notify you on Telegram the moment they do!'}
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {theaterList
-              .filter((t) => {
-                if (selectedTheater) return t.name === selectedTheater;
-                if (customTheater.trim()) return t.name.toLowerCase().includes(customTheater.toLowerCase().trim());
-                return true;
-              })
-              .map((t, i) => (
-                <TheaterCard key={t.id || i} theater={t} />
-              ))}
-          </div>
-        )}
-
-        {/* Alert Button */}
-        <button
-          onClick={() => handleSetAlert()}
-          disabled={setting}
-          className="btn-primary w-full py-4 text-base justify-center shadow-neon mt-4"
-        >
-          {setting ? (
-            <Bell size={20} className="animate-spin" />
-          ) : (
-            <>
               <Bell size={20} />
               Alert me on Telegram for {movie.title}
-              {customTheater ? ` @ ${customTheater}` : selectedTheater ? ` @ ${selectedTheater}` : ''}
-            </>
-          )}
-        </button>
-      </motion.div>
+              {selectedTheater ? ` @ ${selectedTheater}` : ''}
+            </button>
+          </motion.div>
+        </>
+      )}
+
+      <AlertModal
+        open={showAlertModal}
+        onClose={() => setShowAlertModal(false)}
+        tgStatus={tgStatus}
+        refreshTg={() => telegram.status().then((r) => setTgStatus(r?.data || null)).catch(() => {})}
+        initial={{
+          movieTitle: movie.title || fallbackTitle,
+          cityCode,
+          cityName: cityLabel,
+          source: alertSource,
+          sourceMovieId: alertMovieId,
+          slug,
+          altSourceMovieId: alertAltId,
+          language: language || null,
+          showDates,
+          suggestions,
+          theater: selectedTheater,
+        }}
+      />
     </div>
   );
 }
@@ -428,6 +584,7 @@ function TheaterCard({ theater }) {
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-white/45">
                 {s.price != null && <span className="text-accent-400 font-bold">₹{s.price}+</span>}
+                {s.language && <span className="truncate font-semibold">{s.language}</span>}
                 {s.format && <span className="truncate">{s.format}</span>}
                 {s.audi && <span className="truncate">{s.audi}</span>}
               </div>

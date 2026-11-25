@@ -195,6 +195,9 @@ export const theaters = (source, movieId, cityCode, opts = {}) =>
     city_code: cityCode,
     date: opts.date || null,
     slug: opts.slug || null,
+    language: opts.language || null,
+    alt_id: opts.altId || null,
+    alt_slug: opts.altSlug || null,
   });
 
 // ============================================

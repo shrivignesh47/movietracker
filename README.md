@@ -6,6 +6,19 @@ Track any movie, in any Indian city, at any theater. When bookings open — even
 advance/pre-booking windows that open for a future date — MovieTracker pings your
 Telegram within ~60 seconds.
 
+**What you get:**
+
+- **Merged search** — one search hits BookMyShow *and* District, listing
+  **upcoming and now-showing films together**; every card is tagged with the
+  platform(s) it's listed on plus an **UPCOMING / NOW SHOWING** release-status
+  badge, with All / Now showing / Upcoming filter pills. No manual toggle.
+- **Language picker** — multi-language movies (Ramayana → Telugu / Hindi) ask
+  which language you want before showing showtimes.
+- **Suggested theatres** — the alert flow suggests the real theatres we know for
+  that movie + city (a dropdown), then the show date, then Telegram.
+- **Structured confirm flow** — theatre → date → connect Telegram →
+  *"We'll check it for you"*, and the scanner pings you the minute it opens.
+
 > Premium dark cinema UI, no login required to browse, superadmin panel,
 > single-container Docker deploy.
 
@@ -289,31 +302,42 @@ bot (`/disconnect`).
 **Scenario:** *Avengers: Doomsday* pre-booking hasn't opened at Cinepolis yet.
 
 1. Open the movie → the panel honestly shows **“Pre-Booking Not Started Yet”**
-   (or **“BookMyShow Rate-Limited — Retry Soon”** when BMS throttles us).
-2. **Set Alert** with theater = `Cinepolis` → row in `alerts`
-   (`status='pending'`, `is_active=true`, `theater_name='Cinepolis'`).
-3. Every minute `check-alerts` runs for that alert:
+   (or **“BookMyShow Rate-Limited — Retry Soon”** when BMS throttles us), or a
+   **“Missing your theatre? … Click here to set an alert”** panel when the
+   movie has no live shows in that city yet.
+2. The structured modal walks you through it: **movie → theatre (suggested
+   dropdown of every theatre we know for that movie/city) → show date (chips
+   or free date) → Telegram OTP gate → “We'll check it for you”**.
+   Multi-language movies also pin a `language` (Telugu vs Hindi).
+3. The `alerts` row lands with `status='pending'`, `is_active=true`,
+   `theater_name='Cinepolis'`, plus `language` / `target_date` /
+   `alt_source_movie_id` when chosen.
+4. Every minute `check-alerts` runs for that alert:
    - resolves the BMS **region** from the free-text city (any Indian city),
    - resolves the movie's `ET…` id + slug from the city listing if missing,
    - loads the buytickets page and **walks every date chip** (up to 4 pages) —
-     because advance bookings often open for a *future* date while today has
-     no shows,
-   - parses venue cards → `{name, sessions}`,
-   - matches the target theater by name.
-4. The moment a matching venue has sessions:
-   - sends `🚨 TICKETS OPEN NOW!` to the linked chat,
+     unless `target_date` narrows it to one date — because advance bookings
+     often open for a *future* date while today has no shows,
+   - parses venue cards → `{name, sessions}`, filtered by `language`
+     (format string `Hindi • 2D | BARCO…` → first segment),
+   - matches the target theater by name,
+   - **checks the alt platform too** (`alt_source_movie_id`) before giving up —
+     bookings often open on District before BMS, or vice versa.
+5. The moment a matching venue has sessions:
+   - sends `🚨 TICKETS OPEN NOW!` to the linked chat (incl. language + show date),
    - sets `status='triggered'`, `last_notified_at=now()`,
    - **one notification per alert** — reruns return `already_triggered`
      (no spam).
-5. If not open yet → `status='watching'` with a note such as
+6. If not open yet → `status='watching'` with a note such as
    `target theater not on sale yet`, and only `last_checked_at` updates.
 
-**Two alert flavors:**
+**Three alert flavors:**
 
 | Kind | `theater_name` | Triggers when |
 |---|---|---|
 | Movie-level | `NULL` | *any* theater in the city has sessions |
 | Theater-level | e.g. `Cinepolis` | that specific theater (name substring match) has sessions |
+| Language/date-scoped | either | additionally filtered by `language` and/or `target_date` |
 
 **Chat id resolution order:** `alerts.telegram_chat_id` → `profiles` →
 `telegram_links`. Alerts created before linking are back-filled on connect.
@@ -337,12 +361,12 @@ bot (`/disconnect`).
 
 | Function | Method / auth | Purpose |
 |---|---|---|
-| `check-alerts` | POST · `x-cron-secret` **or** user JWT | Scans all `is_active` alerts; BMS region resolver + buytickets date-chip walk + venue session parsing + theater match; District cinema/session check; sends Telegram on first open. Returns `{ok, checked, notified, results:[{id, movie, theater, status: watching\|triggered\|already_triggered, note}]}` |
+| `check-alerts` | POST · `x-cron-secret` **or** user JWT | Scans all `is_active` alerts; BMS region resolver + buytickets date-chip walk + venue session parsing + theater match + language/date filter; District cinema/session check with Language-bucket filter; second pass on the alt platform (`alt_source_movie_id`) before giving up; sends Telegram on first open. Returns `{ok, checked, notified, results:[{id, movie, theater, status: watching\|triggered\|already_triggered, note}]}` |
 | `telegram-webhook` | POST · `x-telegram-bot-api-secret-token` must equal `CRON_SECRET` | Telegram updates: `/start <otp>` linking, `/status`, `/alerts`, `/help`, `/disconnect`, bare OTP |
 | `telegram-otp` | POST · user JWT | `action`: `generate` \| `status` \| `disconnect` \| `connect_manual` |
 | `telegram-alerts` | POST | Sends a message (incl. `is_test:true`) to a given `telegram_chat_id` |
-| `scrape-movies` | POST | `{source, city_code}` → live movie listings (ET ids, posters, language, genre, slug). Honest `{blocked, notListed, note}` states |
-| `scrape-theaters` | POST | `{source, movie_id, city_code, date?, slug?}` → show dates, venue cards with sessions/price tiers. Future-date honest fallback |
+| `scrape-movies` | POST | `{source: 'bookmyshow'\|'district'\|'both', city_code}` → live movie listings (ET ids, posters, language, genre, slug, `release_status`, `release_date`). BookMyShow reads **two lists** — `discover/movies` (→ `now_showing`) and `discover/upcoming-movies-<slug>` (→ `upcoming`, region-slug pattern verified across regions) — with `discover/home` as fallback; District parses grid cards + inline links + JSON-LD and `MovieData` `release_date` epochs (future date → `upcoming`). `both` merges both platforms into one card per movie with `sources[]` + `alt_movie_id`/`alt_slug` (cross-platform id), statuses folded (`upcoming` wins when platforms disagree) and a `counts` breakdown (`now_showing`/`upcoming`/`untagged`). Honest `{blocked, notListed, note}` states |
+| `scrape-theaters` | POST | `{source, movie_id, city_code, date?, slug?, language?, alt_id?, alt_slug?}` → show dates (date chips), venue cards with sessions/price tiers, `languages[]`, `suggestions[]` (every known theatre incl. 0-session ones), `source_used`. `language` filters sessions; `alt_id` cross-platform fallback when the requested platform has nothing |
 | `scrape-cities` | POST | `{q}` → city suggestions (free text, any Indian city) |
 | `admin-alerts` | GET · superadmin JWT | All alerts with profile info for the admin panel |
 
@@ -353,7 +377,7 @@ bot (`/disconnect`).
 | Table | Purpose |
 |---|---|
 | `profiles` | 1:1 with `auth.users`; `role` (`user`/`superadmin`), `telegram_chat_id`, `telegram_username`. Auto-created by trigger on signup |
-| `alerts` | The core row: `movie_title`, `source` (`bookmyshow`/`district`), `city_code`, `city_name`, `source_movie_id`, `slug`, `theater_name`, `is_active`, `status` (`pending`/`triggered`/`error`), `last_checked_at`, `last_notified_at` |
+| `alerts` | The core row: `movie_title`, `source` (`bookmyshow`/`district`), `city_code`, `city_name`, `source_movie_id`, `slug`, `theater_name`, `language`, `target_date`, `alt_source_movie_id`, `is_active`, `status` (`pending`/`triggered`/`error`), `last_checked_at`, `last_notified_at` |
 | `telegram_links` | `user_id` ↔ `telegram_chat_id` (both unique) + username |
 | `telegram_otps` | 6-digit codes, `expires_at` (15 min), `is_used` |
 | `cities` / `movies` / `theaters` / `movie_theaters` | Scraping caches |
@@ -368,9 +392,9 @@ a `profiles` subquery in a `profiles` policy).
 
 | Path | Page | Notes |
 |---|---|---|
-| `/`, `/movies`, `/dashboard` | `Home` | Tracker: platform + free-text city search → movie grid |
-| `/movies/:source/:movieId` | `MovieDetail` | Showtimes by date, theater picker, Set Alert, pre-booking panel |
-| `/alerts` | `AlertsPage` | Alert list, Add Custom Alert modal (free-text city), Check Now, Telegram banner |
+| `/`, `/movies`, `/dashboard` | `Home` | Tracker: free-text city search → **merged BookMyShow + District** movie grid — upcoming and now-showing listed together, each card tagged with its platform(s) and an **UPCOMING / NOW SHOWING** badge, plus All / Now showing / Upcoming filter pills |
+| `/movies/:source/:movieId` | `MovieDetail` | **Language chooser** for multi-language movies (Ramayana → Telugu/Hindi) with an "All languages" escape, date chips, suggested-theatre combobox (`TheaterSelect`), showtimes, and a "Missing your theatre? … Click here to set an alert" panel when nothing is on sale |
+| `/alerts` | `AlertsPage` | Alert list with language/date/both-platform badges, **structured Add Alert modal** (`AlertModal`: movie → city → platform → theatre → date → Telegram OTP gate → "We'll check it for you"), Check Now, Telegram banner |
 | `/telegram` | `Telegram` | OTP generation, deep link, status polling, test alert, disconnect, manual connect |
 | `/admin` | `AdminPage` | Superadmin: users, alerts, roles |
 | `/login` | `Login` | Optional sign in / sign up (`?mode=signup`) |

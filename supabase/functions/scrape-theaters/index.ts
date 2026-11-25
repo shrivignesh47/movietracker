@@ -66,6 +66,13 @@ function money(n: unknown): number | null {
   return Number.isFinite(v) && v > 0 ? Math.round(v) : null;
 }
 
+const titleCase = (s: string) =>
+  String(s).trim().replace(/\s+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+// ---------------------------------------------------------------------------
+// District
+// ---------------------------------------------------------------------------
+
 /** One showtime call. 204 / empty body = not open for that date. */
 async function fetchShowtimes(contentId: string, cityKey: string, date: string) {
   // lat/lng are cosmetic (city_key alone decides which cinemas come back —
@@ -145,31 +152,74 @@ function sessionsOf(cinema: any) {
       avail: typeof s?.avail === "number" ? s.avail : null,
       total: typeof s?.total === "number" ? s.total : null,
       color: s?.statusColor ?? null,
+      mcd: String(s?.mcd ?? ""),
       tiers: tiersOf(s),
     }))
     .filter((s: any) => s.sid);
 }
 
-function theatersOf(data: any) {
-  const cinemas = [
+/** Every cinema District knows for this movie+city, even with 0 shows yet. */
+function cinemasOf(data: any): any[] {
+  return [
     ...(Array.isArray(data?.pageData?.nearbyCinemas) ? data.pageData.nearbyCinemas : []),
     ...(Array.isArray(data?.pageData?.farCinemas) ? data.pageData.farCinemas : []),
   ];
-  return cinemas
-    .map((c: any) => {
-      const info = c?.cinemaInfo ?? {};
-      return {
-        id: String(c?.id ?? info?.providerId ?? ""),
-        name: info?.name ?? "Unknown theatre",
-        address: info?.address ?? "",
-        chain: info?.chainKey ?? info?.theaterGroupName ?? null,
-        city: info?.city ?? null,
-        distance: typeof c?.distanceFromUser === "number" ? c.distanceFromUser : null,
-        sessions: sessionsOf(c),
-      };
-    })
-    .filter((t: any) => t.sessions.length > 0)
-    .sort((a: any, b: any) => (a.distance ?? 99) - (b.distance ?? 99));
+}
+
+/** key (session.mcd) → language title, from District's Language filter bucket. */
+function districtLangMap(data: any): Map<string, string> {
+  const map = new Map<string, string>();
+  const buckets = data?.meta?.filterBuckets;
+  const lb = Array.isArray(buckets)
+    ? buckets.find((b: any) => String(b?.bucketKey ?? b?.bucketName ?? "").toLowerCase() === "language")
+    : null;
+  for (const b of lb?.buckets ?? []) {
+    if (b?.key && b?.title) map.set(String(b.key).toLowerCase(), String(b.title));
+  }
+  return map;
+}
+
+/** Languages this movie runs in this city: those on sale now, plus the
+ *  movie's full language list (a pre-booking alert can target a language
+ *  that hasn't opened yet — e.g. Hindi before Hindi shows exist). */
+function districtLanguages(data: any, sessions: any[]): string[] {
+  const map = districtLangMap(data);
+  const present = new Set(sessions.map((s) => String(s.mcd ?? "").toLowerCase()).filter(Boolean));
+  const out: string[] = [];
+  for (const [key, title] of map) if (present.has(key)) out.push(title);
+  const ml = data?.meta?.movie?.languages;
+  if (Array.isArray(ml)) {
+    for (const x of ml) {
+      const t = String(x ?? "").trim();
+      if (t && !out.some((o) => o.toLowerCase() === t.toLowerCase())) out.push(t);
+    }
+  }
+  return [...new Set(out.filter(Boolean))];
+}
+
+function filterDistrictSessions(list: any[], language: string | null, langMap: Map<string, string>) {
+  if (!language) return list;
+  const want = language.toLowerCase();
+  return list.filter((s) => {
+    const key = String(s?.mcd ?? "").toLowerCase();
+    if (!key) return true;
+    const title = langMap.get(key);
+    if (!title) return true; // unmapped session — never hide what we can't identify
+    return title.toLowerCase() === want;
+  });
+}
+
+function theaterFromCinema(c: any, sessions: any[]) {
+  const info = c?.cinemaInfo ?? {};
+  return {
+    id: String(c?.id ?? info?.providerId ?? ""),
+    name: info?.name ?? "Unknown theatre",
+    address: info?.address ?? "",
+    chain: info?.chainKey ?? info?.theaterGroupName ?? null,
+    city: info?.city ?? null,
+    distance: typeof c?.distanceFromUser === "number" ? c.distanceFromUser : null,
+    sessions,
+  };
 }
 
 function movieMeta(data: any, contentId: string, slug: string | null, cityCode: string) {
@@ -194,6 +244,155 @@ function movieMeta(data: any, contentId: string, slug: string | null, cityCode: 
     source_movie_id: mvId,
     is_bookable: true,
     bookable_url: bookableUrl,
+  };
+}
+
+type TheatersParams = {
+  movie_id: any;
+  city_code: any;
+  date: any;
+  slug: any;
+  language?: string | null;
+};
+
+async function districtPayload(p: TheatersParams): Promise<any> {
+  const contentId = String(p.movie_id ?? "").replace(/^MV/i, "").trim();
+  if (!contentId) {
+    return {
+      ok: false, status: 400, error: "movie_id is required",
+      movie: null, theaters: [], showDates: [], suggestions: [], languages: [],
+    };
+  }
+
+  // Accept any District city key (free-text city search), not just the
+  // built-in table — District validates the key and answers 204 if unknown.
+  const rawKey = String(p.city_code ?? "").trim().toLowerCase();
+  const cityKey = /^[a-z0-9][a-z0-9-]*$/.test(rawKey) ? rawKey : "hyderabad";
+  const requestedDate = /^\d{4}-\d{2}-\d{2}$/.test(String(p.date ?? ""))
+    ? String(p.date)
+    : istToday();
+  const language = String(p.language ?? "").trim() || null;
+
+  let result = await fetchShowtimes(contentId, cityKey, requestedDate);
+  let usedDate = requestedDate;
+
+  // Not open today (or no shows listed): fall back to the first date the API offers.
+  const noShows = result.status !== 200 || cinemasOf(result.data).every(
+    (c) => sessionsOf(c).length === 0
+  );
+
+  if (noShows && result.status === 200) {
+    const showDates: string[] = Array.isArray(result.data?.meta?.showDates)
+      ? result.data.meta.showDates
+      : [];
+    const releaseDate = result.data?.meta?.movie?.release_date;
+    const candidates = [...new Set([...showDates, releaseDate])]
+      .filter((d: any) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && d > requestedDate)
+      .sort();
+
+    for (const candidate of candidates.slice(0, 3)) {
+      const retry = await fetchShowtimes(contentId, cityKey, candidate);
+      if (retry.status === 200 && cinemasOf(retry.data).some((c) => sessionsOf(c).length > 0)) {
+        result = retry;
+        usedDate = candidate;
+        break;
+      }
+      if (retry.status === 200 && retry.data) result = retry; // keep richest metadata
+    }
+  }
+
+  const base = { source_used: "district" as const, date: usedDate, suggestions: [], languages: [] };
+
+  if (result.status === 400 && result.notListed) {
+    return {
+      ...base,
+      ok: true,
+      notListed: true,
+      note: "This movie isn't listed for shows yet. We'll have data once bookings open.",
+      movie: null, theaters: [], showDates: [],
+    };
+  }
+
+  if (result.status === 204) {
+    // District recognised the request but has nothing for this movie+city
+    // (invalid city key or no cinemas showing it here).
+    return {
+      ...base,
+      ok: true,
+      notListed: true,
+      note: "District has no showtimes for this movie in this city yet.",
+      movie: null, theaters: [], showDates: [],
+    };
+  }
+
+  if (result.status !== 200 || !result.data) {
+    return {
+      ...base,
+      ok: false, status: 502, error: `District HTTP ${result.status}`,
+      movie: null, theaters: [], showDates: [],
+    };
+  }
+
+  const data = result.data;
+  const langMap = districtLangMap(data);
+  const cinemas = cinemasOf(data);
+
+  // Suggestions: every cinema in the city for this movie, bookable or not —
+  // this is what the "your theatre isn't open yet" alert flow picks from.
+  const suggestions: any[] = [];
+  const seenNames = new Set<string>();
+  for (const c of cinemas) {
+    const info = c?.cinemaInfo ?? {};
+    const name = String(info?.name ?? "").trim();
+    if (!name || seenNames.has(name.toLowerCase())) continue;
+    seenNames.add(name.toLowerCase());
+    suggestions.push({
+      id: String(c?.id ?? info?.providerId ?? ""),
+      name,
+      address: info?.address ?? "",
+      chain: info?.chainKey ?? info?.theaterGroupName ?? null,
+      distance: typeof c?.distanceFromUser === "number" ? c.distanceFromUser : null,
+    });
+  }
+  suggestions.sort((a, b) => (a.distance ?? 99) - (b.distance ?? 99));
+
+  // All sessions first (drives the language chips), then apply the filter.
+  const allSessions = cinemas.flatMap((c: any) => sessionsOf(c));
+  const languages = districtLanguages(data, allSessions);
+
+  const theaters = cinemas
+    .map((c: any) => {
+      const filtered = filterDistrictSessions(sessionsOf(c), language, langMap);
+      return theaterFromCinema(c, filtered);
+    })
+    .filter((t: any) => t.sessions.length > 0)
+    .sort((a: any, b: any) => (a.distance ?? 99) - (b.distance ?? 99));
+
+  const showDates: string[] = Array.isArray(data?.meta?.showDates)
+    ? [...data.meta.showDates].sort()
+    : [];
+
+  let note: string | null = null;
+  if (!theaters.length) {
+    note = showDates.length
+      ? `No shows on this date yet — bookings open from ${showDates[0]}.`
+      : "Bookings haven't opened yet for this movie in this city.";
+  }
+
+  return {
+    ...base,
+    ok: true,
+    blocked: false,
+    showDates,
+    movie: movieMeta(data, contentId, String(p.slug ?? "") || null, cityKey),
+    theaters,
+    suggestions,
+    languages,
+    note,
+    stats: {
+      cinemaCount: theaters.length,
+      sessionCount: theaters.reduce((n: number, t: any) => n + t.sessions.length, 0),
+    },
   };
 }
 
@@ -373,8 +572,8 @@ async function bmsFindMovie(region: BmsRegion, et: string) {
             slug: m[2],
             poster: card?.image?.url ?? null,
             title: title?.trim() ?? null,
-            language: langRaw ? langRaw.charAt(0).toUpperCase() + langRaw.slice(1) : null,
-            genre: genreRaw ? genreRaw.split("|").filter(Boolean).map((g) => g.charAt(0).toUpperCase() + g.slice(1)).join(", ") : null,
+            language: langRaw ? titleCase(langRaw) : null,
+            genre: genreRaw ? genreRaw.split("|").filter(Boolean).map(titleCase).join(", ") : null,
           };
         }
       }
@@ -423,7 +622,14 @@ function bmsSeatInfo(widgets: any[]) {
   return { price, tiers: tiers.join(" · "), soldOut };
 }
 
-function bmsTheatersOf(data: any) {
+/** "Hindi • 2D | BARCO …" → language is the first segment before "•". */
+function bmsLanguageOf(fmtStr: string): string {
+  const segs = String(fmtStr ?? "").split("|").map((x) => x.trim()).filter(Boolean);
+  const bits = (segs[0] ?? "").split("•").map((x) => x.trim()).filter(Boolean);
+  return bits[0] ?? "";
+}
+
+function bmsTheatersOf(data: any, language: string | null) {
   const cards: any[] = [];
   for (const w of data?.showtimeWidgets ?? []) {
     if (w?.type !== "groupList") continue;
@@ -431,7 +637,12 @@ function bmsTheatersOf(data: any) {
       for (const c of g?.data ?? []) if (c?.type === "venue-card") cards.push(c);
     }
   }
+
   const showCodes = new Set<string>();
+  const suggestions: any[] = [];
+  const seen = new Set<string>();
+  const languages = new Set<string>();
+
   const theaters = cards
     .map((c) => {
       const name =
@@ -439,6 +650,18 @@ function bmsTheatersOf(data: any) {
         c?.header?.data?.components?.[1]?.data?.data?.[0]?.components?.[0]?.text ??
         "Unknown theatre";
       const id = String(c?.additionalData?.venueCode ?? c?.id ?? "");
+      const normalizedName = String(name).trim().toLowerCase();
+      if (!seen.has(normalizedName)) {
+        seen.add(normalizedName);
+        suggestions.push({
+          id: id || `bms_${name}`,
+          name: String(name),
+          address: "",
+          chain: bmsChainOf(String(name)),
+          distance: null,
+        });
+      }
+
       const sessions: any[] = [];
       for (const sec of c?.showtimesSections ?? []) {
         for (const s of sec?.showtimes ?? []) {
@@ -450,6 +673,9 @@ function bmsTheatersOf(data: any) {
           const fmtStr = String(widgets.find((w: any) => w?.layoutId === "format-container")?.variableData?.format ?? "");
           const segs = fmtStr.split("|").map((x: string) => x.trim()).filter(Boolean);
           const bits = (segs[0] ?? "").split("•").map((x: string) => x.trim()).filter(Boolean);
+          const lang = bits[0] ?? "";
+          if (lang) languages.add(lang);
+          if (language && lang && lang.toLowerCase() !== language.toLowerCase()) continue;
           const format = bits.slice(1).join(" • ") || null;
           const audi = segs[1] || ad.attributes || s.screenAttr || null;
           const { price, tiers, soldOut } = bmsSeatInfo(widgets);
@@ -457,6 +683,7 @@ function bmsTheatersOf(data: any) {
             sid,
             time: ad.showTime || s.title || "",
             iso: null,
+            language: lang || null,
             format,
             audi,
             subtitle: null,
@@ -479,86 +706,101 @@ function bmsTheatersOf(data: any) {
       };
     })
     .filter((t) => t.sessions.length > 0);
-  return { theaters, showCodes: [...showCodes] };
+
+  return { theaters, showCodes: [...showCodes], suggestions, languages: [...languages] };
 }
 
-function bmsChipsOf(data: any): string[] {
-  const raw: string[] = [];
+/**
+ * Date chips live on `item.id` with a `styleId` of date-selected / date-default
+ * / date-disabled. Disabled chips are dates with no shows at all, so they are
+ * excluded from the pickable list (but remembered as `all`).
+ */
+function bmsChipsOf(data: any): { enabled: string[]; all: string[] } {
+  const enabled = new Set<string>();
+  const all = new Set<string>();
   for (const sticky of data?.topStickyWidgets ?? []) {
     for (const item of sticky?.data ?? []) {
-      const code = String(item?.cta?.additionalData?.dateCode ?? "");
-      if (/^\d{8}$/.test(code)) raw.push(code);
+      const style = String(item?.styleId ?? "");
+      const ctaCode = String(item?.cta?.additionalData?.dateCode ?? "");
+      const idCode = String(item?.id ?? "");
+      let code = "";
+      if (/^\d{8}$/.test(ctaCode)) code = ctaCode;
+      else if (style.startsWith("date") && /^\d{8}$/.test(idCode)) code = idCode;
+      if (!code) continue;
+      all.add(code);
+      if (style === "date-disabled") continue;
+      enabled.add(code);
     }
   }
-  return [...new Set(raw)].sort();
+  return { enabled: [...enabled].sort(), all: [...all].sort() };
+}
+
+/** BookMyShow's "no shows for this date" widget carries an honest message. */
+function bmsErrorOf(data: any): string | null {
+  for (const w of data?.showtimeWidgets ?? []) {
+    if (w?.type === "errorScreen") {
+      const msg = w?.data?.[0]?.message;
+      if (msg) return String(msg);
+      return "There are no shows available for this date for the selected language format.";
+    }
+  }
+  return null;
 }
 
 const codeToIso = (c: string) => `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)}`;
 
-async function bmsShowtimesResponse(params: { movie_id: any; city_code: any; date: any; slug: any }) {
-  const et = String(params.movie_id ?? "").trim().toUpperCase();
+async function bmsPayload(p: TheatersParams): Promise<any> {
+  const et = String(p.movie_id ?? "").trim().toUpperCase();
+  const base = { source_used: "bookmyshow" as const, suggestions: [], languages: [] };
   if (!/^ET\d+$/.test(et)) {
-    return new Response(
-      JSON.stringify({ ok: false, error: "movie_id must be a BookMyShow event code (ET…)", theaters: [] }),
-      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: false, status: 400,
+      error: "movie_id must be a BookMyShow event code (ET…)",
+      movie: null, theaters: [], showDates: [],
+    };
   }
 
   const regions = await fetchBmsRegions();
   if (!regions) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "BookMyShow regions endpoint unavailable",
-        movie: null, theaters: [], showDates: [],
-      }),
-      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: false, status: 502,
+      error: "BookMyShow regions endpoint unavailable",
+      movie: null, theaters: [], showDates: [],
+    };
   }
-  const region = resolveBmsRegion(regions, String(params.city_code ?? ""));
+  const region = resolveBmsRegion(regions, String(p.city_code ?? ""));
   if (!region) {
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        notListed: true,
-        note: `BookMyShow doesn't cover ${params.city_code} yet.`,
-        movie: null, theaters: [], showDates: [],
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: true, notListed: true,
+      note: `BookMyShow doesn't cover ${p.city_code} yet.`,
+      movie: null, theaters: [], showDates: [],
+    };
   }
 
-  const cityCode = String(params.city_code ?? "");
-  const requestedCode = /^\d{4}-\d{2}-\d{2}$/.test(String(params.date ?? ""))
-    ? String(params.date).replace(/-/g, "")
+  const cityCode = String(p.city_code ?? "");
+  const language = String(p.language ?? "").trim() || null;
+  const requestedCode = /^\d{4}-\d{2}-\d{2}$/.test(String(p.date ?? ""))
+    ? String(p.date).replace(/-/g, "")
     : bmsTodayCode();
 
   // Poster/slug lookup (also needed when the frontend didn't pass a slug)
   const listing = await bmsFindMovie(region, et);
-  let movieSlug = String(params.slug ?? "").trim() || listing?.slug || "";
+  let movieSlug = String(p.slug ?? "").trim() || listing?.slug || "";
   if (!movieSlug) {
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        notListed: true,
-        note: "This movie isn't listed on BookMyShow for this city yet.",
-        movie: null, theaters: [], showDates: [],
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: true, notListed: true,
+      note: "This movie isn't listed on BookMyShow for this city yet.",
+      movie: null, theaters: [], showDates: [],
+    };
   }
 
   let page = await bmsFetchPage(region.slug, movieSlug, et, requestedCode);
   if (page.status === 403 || page.status === 401) {
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        blocked: true,
-        note: `BookMyShow returned ${page.status} (Cloudflare rate-limit). Try again in a minute.`,
-        movie: null, theaters: [], showDates: [],
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: true, blocked: true,
+      note: `BookMyShow returned ${page.status} (Cloudflare rate-limit). Try again in a minute.`,
+      movie: null, theaters: [], showDates: [],
+    };
   }
   // Wrong slug → retry once with the canonical one from the listing
   if ((page.status === 404 || !page.state) && listing?.slug && listing.slug !== movieSlug) {
@@ -566,39 +808,32 @@ async function bmsShowtimesResponse(params: { movie_id: any; city_code: any; dat
     page = await bmsFetchPage(region.slug, movieSlug, et, requestedCode);
   }
   if (page.status === 404 || !page.state) {
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        notListed: true,
-        note: "BookMyShow has no showtimes for this movie in this city yet.",
-        movie: null, theaters: [], showDates: [],
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: true, notListed: true,
+      note: "BookMyShow has no showtimes for this movie in this city yet.",
+      movie: null, theaters: [], showDates: [],
+    };
   }
   if (page.status !== 200) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: `BookMyShow HTTP ${page.status}`,
-        movie: null, theaters: [], showDates: [],
-      }),
-      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return {
+      ...base, ok: false, status: 502, error: `BookMyShow HTTP ${page.status}`,
+      movie: null, theaters: [], showDates: [],
+    };
   }
 
   const queries = page.state?.showtimesFunctionalApi?.queries ?? {};
   const dynKey = Object.keys(queries).find((k) => k.startsWith("fetchPrimaryDynamic"));
   let data = dynKey ? queries[dynKey]?.data?.data ?? null : null;
 
-  let parsed = data ? bmsTheatersOf(data) : { theaters: [], showCodes: [] };
-  let chips = data ? bmsChipsOf(data) : [];
+  let parsed = data ? bmsTheatersOf(data, language) : { theaters: [], showCodes: [], suggestions: [], languages: [] };
+  let chips = data ? bmsChipsOf(data) : { enabled: [], all: [] };
   let usedCode = requestedCode;
+  let errMsg = data ? bmsErrorOf(data) : null;
 
-  if (chips.length && !chips.includes(requestedCode)) {
+  if (chips.enabled.length && !chips.enabled.includes(requestedCode)) {
     // BMS silently falls back to the nearest date for non-chip dates — ask for
     // a date it actually offers instead.
-    const target = chips.find((c) => c >= requestedCode) ?? chips[0];
+    const target = chips.enabled.find((c) => c >= requestedCode) ?? chips.enabled[0];
     if (target) {
       if (parsed.showCodes.includes(target)) {
         usedCode = target; // the page already fell back to the target date
@@ -608,23 +843,29 @@ async function bmsShowtimesResponse(params: { movie_id: any; city_code: any; dat
         const rk = Object.keys(rq).find((k) => k.startsWith("fetchPrimaryDynamic"));
         const rdata = rk ? rq[rk]?.data?.data ?? null : null;
         if (rdata) {
-          const rp = bmsTheatersOf(rdata);
+          const rp = bmsTheatersOf(rdata, language);
           if (rp.theaters.length) {
             data = rdata;
             parsed = rp;
             chips = bmsChipsOf(rdata);
+            errMsg = bmsErrorOf(rdata);
           }
         }
         usedCode = target;
       }
     }
-  } else if (chips.includes(requestedCode) && parsed.showCodes.length && !parsed.showCodes.includes(requestedCode)) {
+  } else if (
+    chips.enabled.includes(requestedCode) &&
+    parsed.showCodes.length &&
+    !parsed.showCodes.includes(requestedCode)
+  ) {
     // Requested a valid chip date but BMS served another date's shows — be
     // honest: no shows for the requested date (chips let the user pick again).
-    parsed = { theaters: [], showCodes: parsed.showCodes };
+    parsed = { ...parsed, theaters: [], showCodes: parsed.showCodes };
   }
 
-  // Movie metadata from the buytickets page state
+  // Movie metadata from the buytickets page state, falling back to the city
+  // listing so the page still renders a title/poster when there are no shows.
   const header = data?.header ?? {};
   const analytics = data?.metadata?.analytics ?? {};
   const rawDuration = String(header?.subtitle?.text ?? "").replace(/^Movie runtime:\s*/i, "").trim();
@@ -632,8 +873,8 @@ async function bmsShowtimesResponse(params: { movie_id: any; city_code: any; dat
   const movie = {
     title: header?.title?.text ?? listing?.title ?? null,
     poster_url: listing?.poster ?? null,
-    language: analytics?.language ?? listing?.language ?? null,
-    genre: genreRaw ? genreRaw.split("|").filter(Boolean).join(", ") : listing?.genre ?? null,
+    language: titleCase(String(analytics?.language ?? listing?.language ?? "")) || null,
+    genre: genreRaw ? genreRaw.split("|").filter(Boolean).map(titleCase).join(", ") : listing?.genre ?? null,
     duration: rawDuration || null,
     release_date: null,
     censor: header?.additionalData?.eventCensor ?? null,
@@ -646,24 +887,49 @@ async function bmsShowtimesResponse(params: { movie_id: any; city_code: any; dat
     bookable_url: `https://in.bookmyshow.com/movies/${region.slug}/${movieSlug}/${et}`,
   };
 
-  const showDates = [...new Set([...chips.map(codeToIso), codeToIso(usedCode)])].sort();
   const theaters = parsed.theaters;
+  const languages = [...new Set([...parsed.languages, movie.language].filter(Boolean))] as string[];
 
-  return new Response(
-    JSON.stringify({
-      ok: true,
-      blocked: false,
-      date: codeToIso(usedCode),
-      showDates,
-      movie,
-      theaters,
-      stats: {
-        cinemaCount: theaters.length,
-        sessionCount: theaters.reduce((n: number, t: any) => n + t.sessions.length, 0),
-      },
-    }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
+  // Pickable dates: only chips BMS actually serves shows for.
+  let showDates = chips.enabled.map(codeToIso);
+  if (!showDates.length) showDates = parsed.showCodes.map(codeToIso);
+  showDates = [...new Set(showDates)].sort();
+
+  let note: string | null = null;
+  if (!theaters.length) {
+    note = errMsg ??
+      (showDates.length
+        ? `No shows on this date yet — bookings open from ${showDates[0]}.`
+        : "Bookings haven't opened yet for this movie in this city.");
+  }
+
+  return {
+    ...base,
+    ok: true,
+    blocked: false,
+    date: codeToIso(usedCode),
+    showDates,
+    movie,
+    theaters,
+    suggestions: parsed.suggestions,
+    languages,
+    note,
+    stats: {
+      cinemaCount: theaters.length,
+      sessionCount: theaters.reduce((n: number, t: any) => n + t.sessions.length, 0),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+function jsonResponse(payload: any, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
 
 serve(async (req) => {
@@ -678,129 +944,45 @@ serve(async (req) => {
       city_code = "hyderabad",
       date = null,
       slug = null,
+      language = null,
+      alt_id = null,
+      alt_slug = null,
     } = await req.json().catch(() => ({}));
 
-    if (source === "bookmyshow") {
-      return await bmsShowtimesResponse({ movie_id, city_code, date, slug });
+    const isBms = source === "bookmyshow";
+    const primaryParams: TheatersParams = { movie_id, city_code, date, slug, language };
+
+    let payload = isBms ? await bmsPayload(primaryParams) : await districtPayload(primaryParams);
+
+    // Cross-platform fallback: the requested platform has nothing for this
+    // movie+city, but the other one may already be selling (or listing) it.
+    const altIdStr = String(alt_id ?? "").trim();
+    if (payload.ok && (payload.notListed || !(payload.theaters ?? []).length) && altIdStr) {
+      const altParams: TheatersParams = {
+        movie_id: altIdStr,
+        city_code,
+        date,
+        slug: alt_slug ?? null,
+        language,
+      };
+      const alt = isBms ? await districtPayload(altParams) : await bmsPayload(altParams);
+      if (alt.ok && (alt.theaters ?? []).length) payload = alt;
     }
 
-    const contentId = String(movie_id).replace(/^MV/i, "").trim();
-    if (!contentId) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "movie_id is required", theaters: [] }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Accept any District city key (free-text city search), not just the
-    // built-in table — District validates the key and answers 204 if unknown.
-    const rawKey = String(city_code ?? "").trim().toLowerCase();
-    const cityKey = /^[a-z0-9][a-z0-9-]*$/.test(rawKey) ? rawKey : "hyderabad";
-    const requestedDate = /^\d{4}-\d{2}-\d{2}$/.test(String(date ?? "")) ? String(date) : istToday();
-
-    let result = await fetchShowtimes(contentId, cityKey, requestedDate);
-    let usedDate = requestedDate;
-
-    // Not open today (or no shows listed): fall back to the first date the API offers.
-    const noShows =
-      result.status !== 200 ||
-      theatersOf(result.data).length === 0;
-
-    if (noShows && result.status === 200) {
-      const showDates: string[] = Array.isArray(result.data?.meta?.showDates)
-        ? result.data.meta.showDates
-        : [];
-      const releaseDate = result.data?.meta?.movie?.release_date;
-      const candidates = [...new Set([...showDates, releaseDate])]
-        .filter((d: any) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && d > requestedDate)
-        .sort();
-
-      for (const candidate of candidates.slice(0, 3)) {
-        const retry = await fetchShowtimes(contentId, cityKey, candidate);
-        if (retry.status === 200 && theatersOf(retry.data).length > 0) {
-          result = retry;
-          usedDate = candidate;
-          break;
-        }
-        if (retry.status === 200 && retry.data) result = retry; // keep richest metadata
-      }
-    }
-
-    if (result.status === 400 && result.notListed) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          notListed: true,
-          note: "This movie isn't listed for shows yet. We'll have data once bookings open.",
-          movie: null,
-          theaters: [],
-          showDates: [],
-          date: usedDate,
-        }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    if (result.status === 204) {
-      // District recognised the request but has nothing for this movie+city
-      // (invalid city key or no cinemas showing it here).
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          notListed: true,
-          note: "District has no showtimes for this movie in this city yet.",
-          movie: null,
-          theaters: [],
-          showDates: [],
-          date: usedDate,
-        }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    if (result.status !== 200 || !result.data) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: `District HTTP ${result.status}`,
-          movie: null,
-          theaters: [],
-          showDates: [],
-        }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const theaters = theatersOf(result.data);
-    const showDates: string[] = Array.isArray(result.data?.meta?.showDates)
-      ? [...result.data.meta.showDates].sort()
-      : [];
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        blocked: false,
-        date: usedDate,
-        showDates,
-        movie: movieMeta(result.data, contentId, slug, cityKey),
-        theaters,
-        stats: {
-          cinemaCount: theaters.length,
-          sessionCount: theaters.reduce((n: number, t: any) => n + t.sessions.length, 0),
-        },
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  } catch (err) {
-    return new Response(
-      JSON.stringify({
+    const status = Number(payload?.status);
+    return jsonResponse(payload, status >= 400 ? status : 200);
+  } catch (err: any) {
+    return jsonResponse(
+      {
         ok: false,
         error: err?.message ?? "unknown error",
         movie: null,
         theaters: [],
         showDates: [],
-      }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        suggestions: [],
+        languages: [],
+      },
+      500
     );
   }
 });

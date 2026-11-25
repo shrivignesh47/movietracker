@@ -154,6 +154,10 @@ alter table public.alerts add column if not exists city_name text;
 alter table public.alerts add column if not exists theater_id text;
 alter table public.alerts add column if not exists status text default 'pending';
 alter table public.alerts add column if not exists last_checked_at timestamptz;
+-- structured alert flow: language picker, chosen show date, cross-platform id
+alter table public.alerts add column if not exists language text;
+alter table public.alerts add column if not exists target_date text;
+alter table public.alerts add column if not exists alt_source_movie_id text;
 
 -- indexes for polling performance
 create index if not exists idx_alerts_active on public.alerts(is_active);

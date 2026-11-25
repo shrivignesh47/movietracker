@@ -154,7 +154,7 @@ export default function Home() {
               Pick a movie. We’ll watch it.
             </h2>
             <p className="text-white/50 mt-2 max-w-xl">
-              Choose platform and city, find your movie, set an alert — no sign-up wall.
+              BookMyShow and District in one search — upcoming and now-showing, no sign-up wall.
             </p>
           </motion.div>
 
