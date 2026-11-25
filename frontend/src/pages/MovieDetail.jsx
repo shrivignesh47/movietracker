@@ -106,13 +106,15 @@ export default function MovieDetail() {
             <Bell size={32} />
           </div>
           <span className="badge bg-accent-500/20 text-accent-400 border-accent-500/40 text-xs mb-3">
-            Pre-Booking Not Started Yet
+            {blocked ? 'BookMyShow Rate-Limited — Retry Soon' : 'Pre-Booking Not Started Yet'}
           </span>
           <h2 className="text-2xl font-bold text-white font-display mb-2">
             {fallbackTitle}
           </h2>
           <p className="text-white/60 text-sm leading-relaxed mb-6">
-            {note || `Tickets haven't opened yet for this movie in ${cityCode || 'your city'}. Set an alert and we'll ping you on Telegram the exact minute booking opens!`}
+            {note || (blocked
+              ? 'BookMyShow is temporarily limiting requests from our servers. It usually clears within a minute — set an alert and we keep watching for you.'
+              : `Tickets haven't opened yet for this movie in ${cityCode || 'your city'}. Set an alert and we'll ping you on Telegram the exact minute booking opens!`)}
           </p>
 
           <div className="space-y-4 text-left bg-white/5 p-5 rounded-2xl border border-white/10 mb-6">

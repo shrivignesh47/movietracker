@@ -38,7 +38,7 @@ export const auth = {
 // ============================================
 // Telegram (OTP + Status + Direct Link)
 // ============================================
-const DEFAULT_BOT_NAME = 'movietracker_bot';
+const DEFAULT_BOT_NAME = 'Theatre_Movie_tracker_bot';
 
 export const telegram = {
   // Generate OTP for connecting Telegram bot

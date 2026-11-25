@@ -39,6 +39,16 @@ serve(async (req) => {
       });
     }
 
+    // Only accept updates signed with our webhook secret (set via setWebhook).
+    const expectedSecret = Deno.env.get("CRON_SECRET");
+    const providedSecret = req.headers.get("x-telegram-bot-api-secret-token");
+    if (expectedSecret && providedSecret !== expectedSecret) {
+      return new Response(JSON.stringify({ ok: false, error: "invalid webhook secret" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);

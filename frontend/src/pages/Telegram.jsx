@@ -73,7 +73,7 @@ export default function Telegram() {
     try {
       const data = await telegram.generateOtp();
       setOtpData(data);
-      toast.success('New OTP generated! Open @movietracker in Telegram.');
+      toast.success(`New OTP generated! Open @${data.bot_username || 'Theatre_Movie_tracker_bot'} in Telegram.`);
     } catch (err) {
       toast.error(err.message || 'Failed to generate OTP');
     } finally {
@@ -136,7 +136,7 @@ export default function Telegram() {
     }
   };
 
-  const botName = otpData?.bot_username || status?.bot_username || 'movietracker_bot';
+  const botName = otpData?.bot_username || status?.bot_username || 'Theatre_Movie_tracker_bot';
 
   if (authChecking) {
     return (
@@ -156,7 +156,7 @@ export default function Telegram() {
           </Link>
           <div>
             <h1 className="text-3xl font-bold tracking-tight font-display">Telegram Alerts</h1>
-            <p className="text-white/50 text-sm">Connect with <strong className="text-white">@movietracker</strong> bot to receive instant booking notifications.</p>
+            <p className="text-white/50 text-sm">Connect with <strong className="text-white">@{botName}</strong> bot to receive instant booking notifications.</p>
           </div>
         </div>
         <button

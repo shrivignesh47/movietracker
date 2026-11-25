@@ -22,10 +22,23 @@ create policy "Profiles are viewable by everyone"
 create policy "Users can update own profile"
   on public.profiles for update using ( auth.uid() = id );
 
-create policy "Superadmin can manage all profiles"
-  on public.profiles for all using (
-    exists (select 1 from public.profiles where id = auth.uid() and role = 'superadmin')
+-- Superadmin checks use a SECURITY DEFINER helper: a policy on profiles that
+-- queries profiles itself causes infinite recursion in PostgREST (42P17).
+create or replace function public.is_superadmin()
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles where id = auth.uid() and role = 'superadmin'
   );
+$$;
+
+drop policy if exists "Superadmin can manage all profiles" on public.profiles;
+create policy "Superadmin can manage all profiles"
+  on public.profiles for all using ( public.is_superadmin() );
 
 -- Trigger to automatically create a profile when a user signs up
 create or replace function public.handle_new_user()
@@ -172,9 +185,7 @@ create policy "Users can delete own alerts"
 
 drop policy if exists "Superadmin can manage all alerts" on public.alerts;
 create policy "Superadmin can manage all alerts"
-  on public.alerts for all using (
-    exists (select 1 from public.profiles where id = auth.uid() and role = 'superadmin')
-  );
+  on public.alerts for all using ( public.is_superadmin() );
 
 -- RLS on telegram_links
 alter table public.telegram_links enable row level security;
@@ -197,9 +208,7 @@ create policy "Users can delete own telegram link"
 
 drop policy if exists "Superadmin can manage all telegram links" on public.telegram_links;
 create policy "Superadmin can manage all telegram links"
-  on public.telegram_links for all using (
-    exists (select 1 from public.profiles where id = auth.uid() and role = 'superadmin')
-  );
+  on public.telegram_links for all using ( public.is_superadmin() );
 
 -- RLS on telegram_otps
 alter table public.telegram_otps enable row level security;

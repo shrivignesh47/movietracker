@@ -18,6 +18,7 @@ export default function TrackerSection({ id = 'tracker' }) {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [touched, setTouched] = useState(false);
+  const [loadNote, setLoadNote] = useState('');
   const navigate = useNavigate();
 
   const handleCityChange = (code, name) => {
@@ -31,12 +32,22 @@ export default function TrackerSection({ id = 'tracker' }) {
     if (!cityCode) return;
     setLoading(true);
     setTouched(true);
+    setLoadNote('');
     try {
       const res = await movies(source, cityCode);
       const data = res.data?.movies || res.data || [];
       setMovieList(Array.isArray(data) ? data : []);
+      if (!Array.isArray(data) || data.length === 0) {
+        setLoadNote(
+          res.data?.note ||
+          (res.data?.blocked
+            ? 'BookMyShow is rate-limiting requests right now. Try again in a minute.'
+            : '')
+        );
+      }
     } catch (_) {
       setMovieList([]);
+      setLoadNote('');
     } finally {
       setLoading(false);
     }
@@ -148,7 +159,9 @@ export default function TrackerSection({ id = 'tracker' }) {
             <div className="glass-panel p-14 text-center rounded-4xl">
               <Film size={48} className="mx-auto mb-4 text-white/20" />
               <h4 className="font-bold text-white mb-2">No movies found</h4>
-              <p className="text-white/50 text-sm">Try a different city, platform or search term.</p>
+              <p className="text-white/50 text-sm">
+                {loadNote || 'Try a different city, platform or search term.'}
+              </p>
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">

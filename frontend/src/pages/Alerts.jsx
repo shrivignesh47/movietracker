@@ -5,21 +5,9 @@ import {
   Bot, AlertTriangle, CheckCircle, RefreshCw, X, Shield, Sparkles
 } from 'lucide-react';
 import { supabase, alerts, telegram } from '../api';
+import CitySearch from '../components/CitySearch';
 import { toast } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
-
-const POPULAR_CITIES = [
-  { code: 'hyderabad', name: 'Hyderabad' },
-  { code: 'mumbai', name: 'Mumbai' },
-  { code: 'delhi', name: 'Delhi NCR' },
-  { code: 'bengaluru', name: 'Bengaluru' },
-  { code: 'chennai', name: 'Chennai' },
-  { code: 'pune', name: 'Pune' },
-  { code: 'kochi', name: 'Kochi' },
-  { code: 'ahmedabad', name: 'Ahmedabad' },
-  { code: 'kolkata', name: 'Kolkata' },
-  { code: 'chandigarh', name: 'Chandigarh' },
-];
 
 export default function AlertsPage() {
   const navigate = useNavigate();
@@ -33,8 +21,11 @@ export default function AlertsPage() {
   const [formMovie, setFormMovie] = useState('');
   const [formSource, setFormSource] = useState('bookmyshow');
   const [formCity, setFormCity] = useState('hyderabad');
+  const [formCityName, setFormCityName] = useState('Hyderabad');
   const [formTheater, setFormTheater] = useState('');
   const [savingAlert, setSavingAlert] = useState(false);
+
+  const botName = tgStatus?.bot_username || 'Theatre_Movie_tracker_bot';
 
   useEffect(() => {
     loadData();
@@ -90,7 +81,11 @@ export default function AlertsPage() {
       const updated = await alerts.list();
       setAlertList(updated.data || []);
     } catch (err) {
-      toast.error('Alert check failed or Edge Function not deployed');
+      if (err?.response?.status === 401) {
+        toast.error('Sign in to run a manual check — the scanner runs every minute automatically.');
+      } else {
+        toast.error('Alert check failed or Edge Function not deployed');
+      }
     } finally {
       setCheckingNow(false);
     }
@@ -104,12 +99,11 @@ export default function AlertsPage() {
     }
     setSavingAlert(true);
     try {
-      const cityName = POPULAR_CITIES.find((c) => c.code === formCity)?.name || formCity;
       const { data, error } = await alerts.create({
         movie_title: formMovie.trim(),
         source: formSource,
         city_code: formCity,
-        city_name: cityName,
+        city_name: formCityName || formCity,
         theater_name: formTheater.trim() || null,
         is_active: true,
         status: 'pending',
@@ -170,7 +164,7 @@ export default function AlertsPage() {
             </div>
             <div>
               <p className="text-sm font-bold text-white">
-                Telegram Alerts Active <span className="text-xs text-green-400 font-normal">(@movietracker bot linked)</span>
+                Telegram Alerts Active <span className="text-xs text-green-400 font-normal">(@{botName} bot linked)</span>
               </p>
               <p className="text-xs text-white/50">
                 Alerts will be delivered instantly to {tgStatus.link?.telegram_username ? `@${tgStatus.link.telegram_username}` : `Chat ID: ${tgStatus.link?.telegram_chat_id}`}
@@ -194,7 +188,7 @@ export default function AlertsPage() {
             <div>
               <p className="text-sm font-bold text-white">Telegram Not Linked</p>
               <p className="text-xs text-white/50">
-                Connect with our @movietracker bot using a 6-digit OTP to receive instant alerts the second bookings open.
+                Connect with our @{botName} bot using a 6-digit OTP to receive instant alerts the second bookings open.
               </p>
             </div>
           </div>
@@ -331,15 +325,15 @@ export default function AlertsPage() {
                     <label className="text-xs font-semibold text-white/60 uppercase tracking-wider">
                       City
                     </label>
-                    <select
+                    <CitySearch
+                      source={formSource}
                       value={formCity}
-                      onChange={(e) => setFormCity(e.target.value)}
-                      className="glass-input"
-                    >
-                      {POPULAR_CITIES.map((c) => (
-                        <option key={c.code} value={c.code}>{c.name}</option>
-                      ))}
-                    </select>
+                      onChange={(code, name) => {
+                        setFormCity(code);
+                        setFormCityName(name);
+                      }}
+                      placeholder="Search any Indian city…"
+                    />
                   </div>
                 </div>
 
